@@ -19,6 +19,7 @@
 
 #include <c10/macros/Macros.h>
 #include <c10/util/C++17.h>
+#include <c10/util/Float8_fnuz_cvt.h>
 #include <c10/util/TypeSafeSignMath.h>
 #include <c10/util/floating_point_utils.h>
 #include <type_traits>
@@ -33,86 +34,56 @@
 #include <iosfwd>
 #include <ostream>
 
+#if (defined(__HIP__) || defined(__HIPCC__)) && \
+    (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
+#define __HIP__MI300__
+#endif
+
 namespace c10 {
 
 namespace detail {
+#ifdef __HIP__MI300__
+// device specific optimized F8 down-conversion code
+template <bool stochastic_rounding = false>
+static C10_DEVICE uint8_t
+fp8e4m3fnuz_from_fp32_value(float v, uint32_t rng = 0) {
+  uint8_t i8data;
+  union {
+    float fval;
+    uint32_t i32val;
+    uint8_t i8val[4]; // NOTE: not endian independent
+  } val;
 
-/*
- * Convert a 32-bit floating-point number in IEEE single-precision format to a
- * 8-bit floating-point number in fp8 E4M3FNUZ format, in bit representation.
- */
-inline C10_HOST_DEVICE uint8_t fp8e4m3fnuz_from_fp32_value(float f) {
-  /*
-   * Binary representation of 256.0f, which is the first value not representable
-   * (i.e. the first value which would overflow in to the sign bit, resulting in
-   * a NaN) in fp8e4m3fnuz range:
-   * 1 0000 000 - fp8e4m3fnuz
-   * 0 10000111 00000000000000000000000 - fp32
-   */
-  constexpr uint32_t fnuz_max = UINT32_C(0x87) << 23;
+  uint32_t ival = 0;
+  val.fval = v;
 
-  /*
-   * A mask for converting fp32 numbers lower than fp8e4m3fnuz normal range
-   * into denorm representation
-   * magic number: ((127 - 8) + (23 - 3) + 1)
-   */
-  constexpr uint32_t denorm_mask = UINT32_C(0x8C) << 23;
-
-  uint32_t f_bits = fp32_to_bits(f);
-
-  uint32_t result = 0u;
-
-  /*
-   * Extract the sign of the input number into the high bit of the 32-bit word:
-   *
-   *      +---+----------------------------------+
-   *      | S |0000000 00000000 00000000 00000000|
-   *      +---+----------------------------------+
-   * Bits  31                 0-31
-   */
-  const uint32_t sign = f_bits & UINT32_C(0x80000000);
-
-  /*
-   * Set sign bit to 0
-   */
-  f_bits ^= sign;
-
-  if (f_bits >= fnuz_max) {
-    // NaN -- sign bit set to 1, rest 0s.
-    return 0x80;
+  if ((val.i32val & 0x7F800000) !=
+      0x7F800000) { /// propagate NAN/INF, no clipping
+    val.fval = __builtin_amdgcn_fmed3f(val.fval, 240.0, -240.0);
   }
-
-  if (f_bits < (UINT32_C(0x78) << 23) /* 2^-7 in float32 */) {
-    // Input exponent is less than -7, the smallest e4m3fnuz exponent, so the
-    // number will become subnormal.
-    f_bits = fp32_to_bits(fp32_from_bits(f_bits) + fp32_from_bits(denorm_mask));
-    result = static_cast<uint8_t>(f_bits - denorm_mask);
-    if (result == 0) {
-      // fnuz types don't have negative zero.
-      return 0;
-    }
-  } else {
-    // resulting mantissa is odd
-    uint8_t mant_odd = (f_bits >> 20) & 1;
-
-    // update exponent, rounding bias part 1
-    f_bits += ((uint32_t)(8 - 127) << 23) + 0x7FFFF;
-
-    // rounding bias part 2
-    f_bits += mant_odd;
-
-    // take the bits!
-    result = static_cast<uint8_t>(f_bits >> 20);
+  if (stochastic_rounding) {
+    ival = __builtin_amdgcn_cvt_sr_fp8_f32(val.fval, rng, ival, 0); // 0 pos
+    val.i32val = ival;
+    i8data = val.i8val[0]; // little endian
+  } else // RNE CVT
+  {
+    ival = __builtin_amdgcn_cvt_pk_fp8_f32(
+        val.fval,
+        val.fval,
+        ival,
+        false); // false -> WORD0
+    val.i32val = ival;
+    i8data = val.i8val[0];
   }
-
-  result |= sign >> 24;
-  return result;
+  return i8data;
 }
+#endif // __HIP__MI300__
 
 } // namespace detail
 
 struct alignas(1) Float8_e4m3fnuz {
   uint8_t x;
+  enum class rounding_mode { standard, stochastic };
 
   struct from_bits_t {};
   C10_HOST_DEVICE static constexpr from_bits_t from_bits() {
@@ -120,18 +91,72 @@ struct alignas(1) Float8_e4m3fnuz {
   }
 
   Float8_e4m3fnuz() = default;
+  C10_HOST_DEVICE constexpr Float8_e4m3fnuz(const Float8_e4m3fnuz&) = default;
 
   constexpr C10_HOST_DEVICE Float8_e4m3fnuz(uint8_t bits, from_bits_t)
-      : x(bits){};
-  inline C10_HOST_DEVICE Float8_e4m3fnuz(float value);
-  inline C10_HOST_DEVICE operator float() const;
+      : x(bits) {}
+
+#ifdef __HIP__MI300__
+  // NOTE: ON-DEVICE... always optimal bias
+  C10_DEVICE Float8_e4m3fnuz(
+      float v,
+      rounding_mode rm = rounding_mode::standard,
+      uint32_t rng = 0) {
+    // runtime branch, use fp8e4m3fnuz_from_fp32_value if want to avoid it
+    if (rm == rounding_mode::stochastic) {
+      x = detail::fp8e4m3fnuz_from_fp32_value<true>(v, rng);
+    } else {
+      x = detail::fp8e4m3fnuz_from_fp32_value<false>(v);
+    }
+  }
+
+  // Host only implementation using s/w simulation
+  C10_HOST
+#else // __HIP__MI300__
+  // both Host and DEVICE for non-MI300 using s/w simulation
+  C10_HOST_DEVICE
+#endif // __HIP__MI300__
+  Float8_e4m3fnuz(
+      float v,
+      rounding_mode rm = rounding_mode::standard,
+      uint32_t rng = 0) {
+    x = detail::fp8_fnuz_from_fp32_value<
+        4,
+        3,
+        float,
+        true /*negative_zero_nan*/,
+        true /*clip*/>(v, (rm == rounding_mode::stochastic), rng);
+  }
+
+#ifdef __HIP__MI300__
+  // upcast using device specific intrinsic
+  inline C10_DEVICE operator float() const {
+    float fval;
+    uint32_t i32val = static_cast<uint32_t>(x);
+
+    // upcast
+    asm volatile("v_cvt_f32_fp8 %0, %1 src0_sel:BYTE_0"
+                 : "=v"(fval)
+                 : "v"(i32val));
+
+    return fval;
+  }
+
+  inline C10_HOST operator float() const
+#else // __HIP__MI300__
+  inline C10_HOST_DEVICE operator float() const
+#endif // __HIP__MI300__
+  {
+    return detail::
+        fp8_fnuz_to_fp32_value<4, 3, float, true /*negative_zero_nan*/>(x);
+  }
+
   inline C10_HOST_DEVICE bool isnan() const;
 };
 
 C10_API std::ostream& operator<<(
     std::ostream& out,
     const Float8_e4m3fnuz& value);
-
 } // namespace c10
 
 #include <c10/util/Float8_e4m3fnuz-inl.h> // IWYU pragma: keep
