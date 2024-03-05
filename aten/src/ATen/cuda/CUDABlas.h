@@ -61,6 +61,8 @@ template <>
 void gemm<at::Half>(CUDABLAS_GEMM_ARGTYPES(at::Half));
 template <>
 void gemm<at::BFloat16>(CUDABLAS_GEMM_ARGTYPES(at::BFloat16));
+template <>
+void gemm<c10::Float8_e4m3fnuz>(CUDABLAS_GEMM_ARGTYPES(c10::Float8_e4m3fnuz));
 
 #if (!defined(USE_ROCM) && !defined(_MSC_VER)) || (defined(USE_ROCM) && ROCM_VERSION >= 50700)
 enum GEMMAndBiasActivationEpilogue {

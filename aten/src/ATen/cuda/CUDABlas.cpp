@@ -558,6 +558,92 @@ void gemm<at::BFloat16>(CUDABLAS_GEMM_ARGTYPES(at::BFloat16)) {
   TORCH_CUDABLAS_CHECK(cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH));
 }
 
+void fp8_gemm(
+    bool transpose_mat1,
+    bool transpose_mat2,
+    int64_t m,
+    int64_t n,
+    int64_t k,
+    const void* mat1_ptr,
+    int64_t mat1_ld,
+    const void* mat2_ptr,
+    int64_t mat2_ld,
+    void* result_ptr,
+    int64_t result_ld) {
+  hipDataType abType = HIP_R_8F_E4M3_FNUZ;
+  hipDataType cType = HIP_R_8F_E4M3_FNUZ;
+
+  hipblasLtMatmulDesc_t computeDesc;
+  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescCreate(&computeDesc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
+
+  hipblasOperation_t transa = transpose_mat1 ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(computeDesc, HIPBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(int32_t)));
+  hipblasOperation_t transb = transpose_mat2 ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(computeDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(int32_t)));
+
+  hipblasLtMatrixLayout_t Adesc;
+  CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Adesc, abType, m, k, mat1_ld));
+  hipblasLtMatrixLayout_t Bdesc;
+  CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Bdesc, abType, k, n, mat2_ld));
+  hipblasLtMatrixLayout_t Cdesc;
+  CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Cdesc, cType, m, n, result_ld));
+
+  hipblasLtHandle_t ltHandle = at::cuda::getCurrentCUDABlasLtHandle();
+
+  // cublas team: alpha and beta need to be the same dtype as of scaleType
+  float alpha_val = 1.0f;
+  float beta_val = 0;
+
+  hipblasLtMatmulPreference_t pref;
+  hipblasLtMatmulPreferenceCreate(&pref);
+
+  hipblasLtMatmulHeuristicResult_t results[1];
+  int numResults;
+
+  CHECK_HIPBLAS_ERROR(hipblasLtMatmulAlgoGetHeuristic(
+    ltHandle,
+    computeDesc,
+    Adesc, Bdesc, Cdesc, Cdesc, pref, 1, results, &numResults
+  ));
+
+  TORCH_CHECK(numResults == 1, "Could not found matmul solution");
+
+  auto cublasStatus = hipblasLtMatmul(
+      ltHandle,
+      computeDesc,
+      &alpha_val,
+      mat1_ptr,
+      Adesc,
+      mat2_ptr,
+      Bdesc,
+      &beta_val,
+      result_ptr,
+      Cdesc,
+      result_ptr,
+      Cdesc,
+      &(results[0].algo),
+      nullptr,
+      0,
+      at::hip::getCurrentHIPStreamMasqueradingAsCUDA());
+  TORCH_CHECK(cublasStatus == HIPBLAS_STATUS_SUCCESS, "CUDA error: ",
+      at::cuda::blas::_cublasGetErrorEnum(cublasStatus));
+  CHECK_HIPBLAS_ERROR(hipblasLtPreferenceDestroy(pref));
+  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescDestroy(computeDesc));
+  CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutDestroy(Adesc));
+  CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutDestroy(Bdesc));
+  CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutDestroy(Cdesc));
+}
+
+template <>
+void gemm<c10::Float8_e4m3fnuz>(CUDABLAS_GEMM_ARGTYPES(c10::Float8_e4m3fnuz)) {
+  hipblasOperation_t opa = _cublasOpFromChar(transa);
+  hipblasOperation_t opb = _cublasOpFromChar(transb);
+  _cublasAdjustLdLevel3(transa, transb, m, n, k, &lda, &ldb, &ldc);
+  GEMM_CHECK_ARGVALUES(double);
+  fp8_gemm(
+      false, false, m, n, k, a, lda, b, ldb, c, ldc);
+}
+
 #if (!defined(USE_ROCM) && !defined(_MSC_VER)) || (defined(USE_ROCM) && ROCM_VERSION >= 50700)
 
 #if defined(USE_ROCM) && ROCM_VERSION >= 50700 && ROCM_VERSION < 60000

@@ -33,15 +33,15 @@ void max_values_kernel_cuda_impl(TensorIterator& iter) {
 }
 
 void max_values_kernel_cuda(TensorIterator& iter) {
-  AT_DISPATCH_ALL_TYPES_AND3(
-      kBFloat16, kHalf, kBool, iter.dtype(), "max_values_cuda", [&]() {
+  AT_DISPATCH_ALL_TYPES_AND4(
+      kBFloat16, kHalf, kFloat8_e4m3fnuz, kBool, iter.dtype(), "max_values_cuda", [&]() {
         max_values_kernel_cuda_impl<scalar_t>(iter);
       });
 }
 
 void max_launch_kernel(TensorIterator& iter) {
-  AT_DISPATCH_ALL_TYPES_AND3(
-      kBFloat16, kHalf, kBool, iter.input_dtype(), "max_cuda", [&]() {
+  AT_DISPATCH_ALL_TYPES_AND4(
+      kBFloat16, kHalf, kFloat8_e4m3fnuz, kBool, iter.input_dtype(), "max_cuda", [&]() {
         gpu_reduce_kernel<scalar_t, scalar_t>(
             iter,
             MaxOps<scalar_t>{},
@@ -51,7 +51,7 @@ void max_launch_kernel(TensorIterator& iter) {
 }
 
 void max_all_launch_kernel(TensorIterator &iter) {
-  AT_DISPATCH_ALL_TYPES_AND3(kBFloat16, kHalf, kBool, iter.input_dtype(), "max_all_cuda", [&] {
+  AT_DISPATCH_ALL_TYPES_AND4(kBFloat16, kHalf, kFloat8_e4m3fnuz, kBool, iter.input_dtype(), "max_all_cuda", [&] {
     max_values_kernel_cuda_impl<scalar_t>(iter);
   });
 }

@@ -36,8 +36,8 @@ void div_true_kernel_cuda(TensorIteratorBase& iter) {
     // optimization for floating-point types: if the second operand is a CPU
     // scalar, compute a * reciprocal(b). Note that this may lose one bit of
     // precision compared to computing the division.
-    AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(
-        kHalf, kBFloat16, common_dtype, "div_true_cuda", [&]() {
+    AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND3(
+        kHalf, kBFloat16, kFloat8_e4m3fnuz, common_dtype, "div_true_cuda", [&]() {
           using opmath_t = at::opmath_type<scalar_t>;
           auto inv_b = opmath_t(1.0) / iter.scalar_value<opmath_t>(2);
           iter.remove_operand(2);
@@ -47,8 +47,8 @@ void div_true_kernel_cuda(TensorIteratorBase& iter) {
                   MulFunctor<opmath_t>(), inv_b));
         });
   } else {
-    AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(
-        kHalf, kBFloat16, common_dtype, "div_true_cuda", [&]() {
+    AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND3(
+        kHalf, kBFloat16, kFloat8_e4m3fnuz, common_dtype, "div_true_cuda", [&]() {
           DivFunctor<scalar_t> f;
           gpu_kernel_with_scalars(iter, f);
         });
