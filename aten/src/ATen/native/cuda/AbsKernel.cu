@@ -36,9 +36,10 @@ void abs_kernel_cuda(TensorIteratorBase& iter) {
     });
 #endif
   } else {
-    AT_DISPATCH_ALL_TYPES_AND3(
+    AT_DISPATCH_ALL_TYPES_AND4(
         ScalarType::Half,
         ScalarType::BFloat16,
+        ScalarType::Float8_e4m3fnuz,
         ScalarType::Bool,
         iter.dtype(),
         "abs_cuda",
