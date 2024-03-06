@@ -559,8 +559,8 @@ void gemm<at::BFloat16>(CUDABLAS_GEMM_ARGTYPES(at::BFloat16)) {
 }
 
 void fp8_gemm(
-    bool transpose_mat1,
-    bool transpose_mat2,
+    hipblasOperation_t opa,
+    hipblasOperation_t opb,
     int64_t m,
     int64_t n,
     int64_t k,
@@ -576,15 +576,21 @@ void fp8_gemm(
   hipblasLtMatmulDesc_t computeDesc;
   CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescCreate(&computeDesc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
-  hipblasOperation_t transa = transpose_mat1 ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(computeDesc, HIPBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(int32_t)));
-  hipblasOperation_t transb = transpose_mat2 ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(computeDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(int32_t)));
+  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(computeDesc, HIPBLASLT_MATMUL_DESC_TRANSA, &opa, sizeof(int32_t)));
+  CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(computeDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &opb, sizeof(int32_t)));
 
   hipblasLtMatrixLayout_t Adesc;
-  CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Adesc, abType, m, k, mat1_ld));
+  if (opa == HIPBLAS_OP_N) {
+    CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Adesc, abType, m, k, mat1_ld));
+  } else {
+    CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Adesc, abType, k, m, mat1_ld));
+  }
   hipblasLtMatrixLayout_t Bdesc;
-  CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Bdesc, abType, k, n, mat2_ld));
+  if (opb == HIPBLAS_OP_N) {
+    CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Bdesc, abType, k, n, mat2_ld));
+  } else {
+    CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Bdesc, abType, n, k, mat2_ld));
+  }
   hipblasLtMatrixLayout_t Cdesc;
   CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutCreate(&Cdesc, cType, m, n, result_ld));
 
@@ -597,16 +603,18 @@ void fp8_gemm(
   hipblasLtMatmulPreference_t pref;
   hipblasLtMatmulPreferenceCreate(&pref);
 
-  hipblasLtMatmulHeuristicResult_t results[1];
+
+  constexpr int requestedResults = 1;
+  hipblasLtMatmulHeuristicResult_t results[requestedResults];
   int numResults;
 
   CHECK_HIPBLAS_ERROR(hipblasLtMatmulAlgoGetHeuristic(
     ltHandle,
     computeDesc,
-    Adesc, Bdesc, Cdesc, Cdesc, pref, 1, results, &numResults
+    Adesc, Bdesc, Cdesc, Cdesc, pref, requestedResults, results, &numResults
   ));
 
-  TORCH_CHECK(numResults == 1, "Could not found matmul solution");
+  TORCH_CHECK(numResults > 0, "Could not found matmul solution");
 
   auto cublasStatus = hipblasLtMatmul(
       ltHandle,
@@ -627,7 +635,7 @@ void fp8_gemm(
       at::hip::getCurrentHIPStreamMasqueradingAsCUDA());
   TORCH_CHECK(cublasStatus == HIPBLAS_STATUS_SUCCESS, "CUDA error: ",
       at::cuda::blas::_cublasGetErrorEnum(cublasStatus));
-  CHECK_HIPBLAS_ERROR(hipblasLtPreferenceDestroy(pref));
+  CHECK_HIPBLAS_ERROR(hipblasLtMatmulPreferenceDestroy(pref));
   CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescDestroy(computeDesc));
   CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutDestroy(Adesc));
   CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutDestroy(Bdesc));
@@ -641,7 +649,7 @@ void gemm<c10::Float8_e4m3fnuz>(CUDABLAS_GEMM_ARGTYPES(c10::Float8_e4m3fnuz)) {
   _cublasAdjustLdLevel3(transa, transb, m, n, k, &lda, &ldb, &ldc);
   GEMM_CHECK_ARGVALUES(double);
   fp8_gemm(
-      false, false, m, n, k, a, lda, b, ldb, c, ldc);
+      opa, opb, m, n, k, a, lda, b, ldb, c, ldc);
 }
 
 #if (!defined(USE_ROCM) && !defined(_MSC_VER)) || (defined(USE_ROCM) && ROCM_VERSION >= 50700)
